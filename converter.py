@@ -49,6 +49,7 @@ TOPIC_CODE_RE = re.compile(r"^## TOPIC (\d+)\.(\d+)\b")
 TOPIC_INLINE_RE = re.compile(r"^TOPIC (\d+):\s*(.+)$", re.IGNORECASE)
 TOPIC_HEADING_RE = re.compile(r"^## TOPIC\b")
 MODULE_FILE_RE = re.compile(r"^M(\d+)$", re.IGNORECASE)
+MODULE_LINE_RE = re.compile(r"^\*{0,2}Module\s*(\d+)\s*[:—\-]\s*(.+?)\*{0,2}$", re.IGNORECASE)
 BULLET_RE = re.compile(r"^(\s*)- (.+)$")
 QA_ITEM_RE = re.compile(r"^\d+\.\s+\*\*Q:\*\*")
 QA_SECTION_RE = re.compile(r"^Q\s*&\s*A(\s+Section)?:?\s*$", re.IGNORECASE)
@@ -131,8 +132,56 @@ def parse_m1_txt_to_structure(filepath: str | Path) -> dict[str, Any]:
                 continue
 
             doc_title_match = DOC_TITLE_RE.match(stripped)
-            if doc_title_match and not structure["title"]:
-                structure["title"] = doc_title_match.group(1).strip()
+            if doc_title_match:
+                title_text = doc_title_match.group(1).strip()
+                if not structure["title"]:
+                    structure["title"] = title_text
+                mod_match = re.search(r"\bModule\s*(\d+)\b", title_text, re.IGNORECASE)
+                mod_title_match = re.search(r"\bModule\s*\d+\s*[:—\-]\s*(.+)", title_text, re.IGNORECASE)
+                if mod_match:
+                    m_num = int(mod_match.group(1))
+                    m_code = f"M{m_num}"
+                    structure["module"] = m_num
+                    structure["module_code"] = m_code
+                else:
+                    file_match = MODULE_FILE_RE.match(path.stem)
+                    m_code = f"M{file_match.group(1)}" if file_match else (structure.get("module_code") or "")
+
+                slide_title = mod_title_match.group(1).strip() if mod_title_match else title_text
+
+                current = {
+                    "type": "module_slide",
+                    "title": slide_title,
+                    "bullets": [],
+                    "notes": "",
+                    "topic_code": m_code,
+                    "module_code": m_code,
+                }
+                structure["sections"].append(current)
+                continue
+
+            module_line_match = MODULE_LINE_RE.match(stripped)
+            if module_line_match:
+                m_num = int(module_line_match.group(1))
+                m_title = module_line_match.group(2).strip()
+                m_code = f"M{m_num}"
+                structure["module"] = m_num
+                structure["module_code"] = m_code
+
+                if current and current.get("type") == "module_slide":
+                    current["title"] = m_title
+                    current["topic_code"] = m_code
+                    current["module_code"] = m_code
+                else:
+                    current = {
+                        "type": "module_slide",
+                        "title": m_title,
+                        "bullets": [],
+                        "notes": "",
+                        "topic_code": m_code,
+                        "module_code": m_code,
+                    }
+                    structure["sections"].append(current)
                 continue
 
             topic_match = TOPIC_CODE_RE.match(stripped)
@@ -301,7 +350,18 @@ def _parse_plaintext_to_structure(filepath: Path) -> dict[str, Any]:
                 structure["module"] = module_num
                 structure["module_code"] = f"M{module_num}"
                 module_code = f"M{module_num}"
-                structure["title"] = module_match.group(2).strip()
+                title_text = module_match.group(2).strip()
+                if not structure["title"]:
+                    structure["title"] = title_text
+                current = {
+                    "type": "module_slide",
+                    "title": f"MODULE {module_num} — {title_text}",
+                    "bullets": [],
+                    "notes": "",
+                    "topic_code": module_code,
+                    "module_code": module_code,
+                }
+                structure["sections"].append(current)
                 continue
 
             section_match = PLAINTEXT_SECTION_RE.match(stripped)
@@ -417,8 +477,26 @@ def _parse_m89_to_structure(filepath: Path) -> dict[str, Any]:
                 continue
 
             doc_title_match = DOC_TITLE_RE.match(stripped)
-            if doc_title_match and not structure["title"]:
-                structure["title"] = doc_title_match.group(1).strip()
+            if doc_title_match:
+                title_text = doc_title_match.group(1).strip()
+                if not structure["title"]:
+                    structure["title"] = title_text
+                mod_match = re.search(r"\bModule\s*(\d+)\b", title_text, re.IGNORECASE)
+                if mod_match:
+                    m_num = int(mod_match.group(1))
+                    m_code = f"M{m_num}"
+                    structure["module"] = m_num
+                    structure["module_code"] = m_code
+                    module_code = m_code
+                current = {
+                    "type": "module_slide",
+                    "title": title_text,
+                    "bullets": [],
+                    "notes": "",
+                    "topic_code": module_code,
+                    "module_code": module_code,
+                }
+                structure["sections"].append(current)
                 continue
 
             slide_match = SLIDE_M89_RE.match(stripped)
@@ -891,9 +969,11 @@ def build_pptx_from_structure(
     current_section_name: str | None = None
     current_section_slides: list[Any] = []
 
+    title_layout = find_layout(prs, TOPIC_DIVIDER_LAYOUT_NAMES, fallback_index=0)
+
     for slide_index, item in enumerate(structure["sections"], start=1):
-        if item["type"] == "section_divider":
-            layout = _divider_layout_for_item(prs, item)
+        if item["type"] in ("module_slide", "section_divider"):
+            layout = title_layout
         else:
             layout = content_layout
         slide = prs.slides.add_slide(layout)
